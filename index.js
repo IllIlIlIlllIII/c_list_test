@@ -130,6 +130,8 @@ async function deleteChat(chat) {
 // UI State
 // =========================
 let cachedChats = null;
+let isSelectMode = false;
+let selectedChats = new Set();
 
 // =========================
 // Concurrency Limiter

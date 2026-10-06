@@ -451,6 +451,13 @@ if (result === POPUP_RESULT.AFFIRMATIVE) {
     deleteBtn.title = t`Delete chat`;
     deleteBtn.innerHTML = '<i class="fa-solid fa-trash"></i>';
 deleteBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+
+        if (!canMutateChatFiles()) {
+            return;
+        }
+
+        const content = document.createElement('div');
         content.innerHTML = '<h3>' + t`Delete this chat?` + '</h3>';
 
         const preview = document.createElement('div');

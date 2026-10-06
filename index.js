@@ -1,5 +1,5 @@
 // =========================
-// Chat_list - SillyTavern Extension
+// Chat_list_test - SillyTavern Extension
 // Replace the Welcome Page "Recent Chats" with a full chat list.
 // List, rename, delete all chats — without entering them.
 // =========================
@@ -21,7 +21,7 @@ const {
     eventSource
 } = SillyTavern.getContext();
 
-const MODULE_NAME = 'Chat_list';
+const MODULE_NAME = 'Chat_list_test';
 const MAX_CHATS_PER_PAGE = 100;
 
 function formatFileSize(bytes) {
@@ -56,7 +56,7 @@ async function getListOfCharacterChats(avatar) {
         if (!Array.isArray(data)) return [];
         return data.map(x => String(x.file_name).replace('.jsonl', ''));
     } catch (error) {
-        console.warn('[Chat_list] Failed to get character chats:', error);
+        console.warn('[Chat_list_test] Failed to get character chats:', error);
         return [];
     }
 }
@@ -120,7 +120,7 @@ async function deleteChat(chat) {
 
         return true;
     } catch (error) {
-        console.error('[Chat_list] Delete failed:', error);
+        console.error('[Chat_list_test] Delete failed:', error);
         toastr.error('Failed to delete chat.');
         return false;
     }
@@ -500,7 +500,7 @@ async function fetchAllChats() {
                 groupChats = groupResults.flat();
             }
         } catch (e) {
-            console.warn('[Chat_list] Failed to load group chats:', e);
+            console.warn('[Chat_list_test] Failed to load group chats:', e);
         }
 
         allChats = [...charChatLists.flat(), ...groupChats];
@@ -858,7 +858,7 @@ function renderExtensionSettings() {
     toggle.classList.add('inline-drawer-toggle', 'inline-drawer-header');
 
     const title = document.createElement('b');
-    title.textContent = 'Chat_list';
+    title.textContent = 'Chat_list_test';
     const icon = document.createElement('div');
     icon.classList.add('inline-drawer-icon', 'fa-solid', 'fa-circle-chevron-down', 'down');
     toggle.append(title, icon);
@@ -876,7 +876,7 @@ function renderExtensionSettings() {
         context.saveSettingsDebounced();
     });
     const span = document.createElement('span');
-    span.textContent = t`Enable Chat_list (needs reload)`;
+    span.textContent = t`Enable Chat_list_test (needs reload)`;
     label.append(checkbox, span);
     content.appendChild(label);
 

@@ -3,8 +3,26 @@
 // Replace the Welcome Page "Recent Chats" with a full chat list.
 // List, rename, delete all chats — without entering them.
 // =========================
-import { getGroupAvatar, getGroupPastChats, groups, select_group_chats } from '../../../group-chats.js';
-import { getPastCharacterChats, selectCharacterById, renameGroupOrCharacterChat, event_types, setActiveGroup } from '../../../../script.js';
+import {
+    getGroupAvatar,
+    getGroupPastChats,
+    groups,
+    select_group_chats,
+    editGroup,
+    createNewGroupChat,
+    is_group_generating,
+} from '../../../group-chats.js';
+
+import {
+    getPastCharacterChats,
+    selectCharacterById,
+    renameGroupOrCharacterChat,
+    event_types,
+    setActiveGroup,
+    replaceCurrentChat,
+    isChatSaving,
+    is_send_press,
+} from '../../../../script.js';
 import { Popup, POPUP_TYPE, POPUP_RESULT } from '../../../popup.js';
 import { timestampToMoment } from '../../../utils.js';
 import { extension_settings } from '../../../extensions.js';
@@ -42,26 +60,6 @@ function getSettings() {
 }
 
 // =========================
-// Chat Data Fetching
-// =========================
-async function getListOfCharacterChats(avatar) {
-    try {
-        const result = await fetch('/api/characters/chats', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({ avatar_url: avatar, simple: true }),
-        });
-        if (!result.ok) return [];
-        const data = await result.json();
-        if (!Array.isArray(data)) return [];
-        return data.map(x => String(x.file_name).replace('.jsonl', ''));
-    } catch (error) {
-        console.warn('[Chat_list_test] Failed to get character chats:', error);
-        return [];
-    }
-}
-
-// =========================
 // Chat Actions
 // =========================
 
@@ -77,15 +75,105 @@ async function openChatById(chatId, isGroup = false, groupId = null) {
     }
 }
 
+function getChatKey(chat) {
+    return `${chat.isGroup ? 'group' : 'character'}:${chat.characterId}:${chat.file_name}`;
+}
+
+function isCurrentManagedChat(chat) {
+    const ctx = SillyTavern.getContext();
+    const currentChatId = getCurrentChatId();
+
+    if (!currentChatId || String(currentChatId) !== String(chat.file_name)) {
+        return false;
+    }
+    if (chat.isGroup) {
+        return String(ctx.groupId) === String(chat.characterId);
+    }
+    return !ctx.groupId && String(ctx.characterId) === String(chat.characterId);
+}
+function canMutateChatFiles() {
+    if (isChatSaving) {
+        toastr.info(
+            t`Please wait until the chat is saved before renaming or deleting chats.`,
+            t`Chat is still saving`,
+        );
+        return false;
+    }
+    if (is_send_press || is_group_generating) {
+        toastr.info(
+            t`Please stop the current generation before renaming or deleting chats.`,
+            t`Generation in progress`,
+        );
+        return false;
+    }
+    return true;
+}
+
 async function deleteChat(chat) {
+    if (!canMutateChatFiles()) return false;
+
     try {
+        const isCurrent = isCurrentManagedChat(chat);
+
         if (chat.isGroup) {
-            const response = await fetch('/api/chats/group', {
-                method: 'DELETE',
+            const group = groups.find(
+                g => String(g.id) === String(chat.characterId)
+            );
+
+            if (
+                !group ||
+                !Array.isArray(group.chats) ||
+                !group.chats.includes(chat.file_name)
+            ) {
+                throw new Error('Group chat not found');
+            }
+
+            // 1) 서버 파일 먼저 삭제
+            const response = await fetch('/api/chats/group/delete', {
+                method: 'POST',
                 headers: getRequestHeaders(),
-                body: JSON.stringify({ id: chat.file_name + '.jsonl', group_id: chat.characterId }),
+                body: JSON.stringify({
+                    id: chat.file_name,
+                }),
             });
-            if (!response.ok) throw new Error('Failed to delete group chat');
+
+            if (!response.ok) {
+                throw new Error(
+                    `Failed to delete group chat (${response.status})`
+                );
+            }
+
+            // 2) 서버 삭제 성공 후에만 그룹 메타데이터 수정
+            group.chats.splice(group.chats.indexOf(chat.file_name), 1);
+
+            if (isCurrent) {
+                // 현재 채팅이었다면 새 현재 chat_id를 만든다.
+                group.chat_id = '';
+
+                const replacement =
+                    group.chats[group.chats.length - 1];
+
+                if (replacement) {
+                    // 남은 채팅 중 하나로 이동
+                    await openGroupChat(group.id, replacement);
+                } else {
+                    // 하나도 없으면 새 그룹 채팅 생성
+                    await createNewGroupChat(group.id);
+                }
+            } else {
+                // 현재 채팅이 아니면 그룹 메타데이터만 저장
+                await editGroup(group.id, true, false);
+            }
+
+            if (
+                eventSource &&
+                typeof eventSource.emit === 'function'
+            ) {
+                await eventSource.emit(
+                    event_types.GROUP_CHAT_DELETED,
+                    chat.file_name,
+                );
+            }
         } else {
             const response = await fetch('/api/chats/delete', {
                 method: 'POST',
@@ -95,33 +183,33 @@ async function deleteChat(chat) {
                     avatar_url: chat.avatar,
                 }),
             });
-            if (!response.ok) throw new Error('Failed to delete chat');
-        }
 
-        // [FIX] emit 먼저 완료한 뒤 캐시 무효화
-        // 기존: cachedChats = null을 emit 전에 해서 이벤트 핸들러가 빈 캐시로 재요청 충돌
-        if (eventSource && typeof eventSource.emit === 'function') {
-            const currentChatId = getCurrentChatId();
-            if (chat.file_name === currentChatId) {
-                eventSource.emit(event_types.CHAT_CHANGED, { chatId: null });
+            if (!response.ok) {
+                throw new Error(
+                    `Failed to delete chat (${response.status})`
+                );
             }
-            try {
-                eventSource.emit(event_types.CHAT_DELETED, {
-                    chatId: chat.file_name,
-                    characterId: chat.characterId,
-                    isGroup: chat.isGroup,
-                });
-            } catch {
-                // CHAT_DELETED 이벤트가 없는 ST 버전에서는 무시
+
+            // 현재 캐릭터 채팅이면 다른 채팅 또는 새 채팅으로 교체
+            if (isCurrent) {
+                await replaceCurrentChat();
+            }
+
+            if (
+                eventSource &&
+                typeof eventSource.emit === 'function'
+            ) {
+                await eventSource.emit(
+                    event_types.CHAT_DELETED,
+                    chat.file_name,
+                );
             }
         }
-
-        cachedChats = null; // emit 완료 후 무효화
-
+        cachedChats = null;
         return true;
     } catch (error) {
-        console.error('[Chat_list_test] Delete failed:', error);
-        toastr.error('Failed to delete chat.');
+        console.error('[Chat_list] Delete failed:', error);
+        toastr.error(t`Failed to delete chat.`);
         return false;
     }
 }
@@ -221,8 +309,7 @@ function createPreviewImage(chat) {
 }
 
 function renderChatItem(chat, container, refreshCallback) {
-    const currentChatId = getCurrentChatId();
-    const isCurrentChat = chat.file_name === currentChatId;
+    const isCurrentChat = isCurrentManagedChat(chat);
     const stat = chat.stat;
 
 // 수정
@@ -233,7 +320,7 @@ if (isSelectMode) {
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.className = 'cm-select-checkbox';
-    const chatKey = chat.characterId + ':' + chat.file_name;
+    const chatKey = getChatKey(chat);
     checkbox.checked = selectedChats.has(chatKey);
     checkbox.addEventListener('change', (e) => {
         e.stopPropagation();
@@ -320,18 +407,42 @@ item.appendChild(previewImg);
             if (ev.key === 'Enter') { ev.preventDefault(); popup.okButton.click(); }
         });
         const result = await popup.show();
-        if (result === POPUP_RESULT.AFFIRMATIVE && nameInput.value.trim() && nameInput.value.trim() !== chat.file_name) {
-            const ctx = SillyTavern.getContext();
-            await renameGroupOrCharacterChat({
-                characterId: chat.characterId,
-                groupId: chat.isGroup ? chat.characterId : ctx.groupId,
-                oldFileName: chat.file_name,
-                newFileName: nameInput.value.trim(),
-                loader: null
-            });
-            cachedChats = null;
-            if (refreshCallback) await refreshCallback();
-        }
+if (result === POPUP_RESULT.AFFIRMATIVE) {
+    if (!canMutateChatFiles()) return;
+
+    // 사용자가 .jsonl까지 입력해도 중복으로 붙지 않게 제거
+    const newFileName = nameInput.value
+        .trim()
+        .replace(/\.jsonl$/i, '')
+        .trim();
+
+    if (!newFileName) {
+        toastr.warning(t`Chat name cannot be empty.`);
+        return;
+    }
+
+    if (newFileName === chat.file_name) {
+        return;
+    }
+
+    await renameGroupOrCharacterChat({
+        characterId: chat.characterId,
+
+        // 중요:
+        // 캐릭터 채팅일 때 현재 context.groupId를 넘기면 안 됨.
+        groupId: chat.isGroup ? chat.characterId : null,
+
+        oldFileName: chat.file_name,
+        newFileName,
+        loader: null,
+    });
+
+    cachedChats = null;
+
+    if (refreshCallback) {
+        await refreshCallback();
+    }
+}
     });
     actions.appendChild(renameBtn);
 
@@ -339,10 +450,7 @@ item.appendChild(previewImg);
     deleteBtn.className = 'cm-action-btn cm-delete-btn';
     deleteBtn.title = t`Delete chat`;
     deleteBtn.innerHTML = '<i class="fa-solid fa-trash"></i>';
-    deleteBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-
-        const content = document.createElement('div');
+deleteBtn.addEventListener('click', async (e) => {
         content.innerHTML = '<h3>' + t`Delete this chat?` + '</h3>';
 
         const preview = document.createElement('div');
@@ -388,7 +496,7 @@ item.addEventListener('click', async (e) => {
 
     // 선택 모드면 체크박스 토글
     if (isSelectMode) {
-        const chatKey = chat.characterId + ':' + chat.file_name;
+        const chatKey = getChatKey(chat);
         const checkbox = item.querySelector('.cm-select-checkbox');
         if (selectedChats.has(chatKey)) {
             selectedChats.delete(chatKey);
@@ -442,119 +550,171 @@ let fetchInFlight = null; // [FIX] 중복 폭주 방지용 in-flight 락
 
 async function fetchAllChats() {
     if (cachedChats) return cachedChats;
-
-    // [FIX] 이미 진행 중인 fetch가 있으면 그 Promise를 그대로 반환
-    // 기존: cachedChats가 null인 짧은 순간에 fetchAllChats가 여러 번 호출되면
-    //       폭주 로직이 그대로 중복 실행되어 동시 요청 수가 배로 늘어남
     if (fetchInFlight) return fetchInFlight;
 
     fetchInFlight = (async () => {
         const context = SillyTavern.getContext();
         const characters = context.characters || {};
+
         let allChats = [];
 
         const charEntries = Object.entries(characters);
 
-        // [FIX] Promise.all → mapWithConcurrency로 교체 (동시 요청 수 제한)
-        const charChatLists = await mapWithConcurrency(charEntries, FETCH_CONCURRENCY, async ([charId, char]) => {
-            try {
-                const chats = await getListOfCharacterChats(char.avatar);
-                return chats.filter(name => typeof name === 'string' && name).map(name => ({
-                    character: char.name || charId,
-                    avatar: char.avatar,
-                    file_name: name,
-                    characterId: charId,
-                    isGroup: false
-                }));
-            } catch { return []; }
-        });
+        // getPastCharacterChats() 하나로
+        // file_name / last_mes / chat_items / file_size 등을 가져온다.
+        const charChatLists = await mapWithConcurrency(
+            charEntries,
+            FETCH_CONCURRENCY,
+            async ([charId, char]) => {
+                try {
+                    const statsList =
+                        await getPastCharacterChats(charId);
+
+                    return statsList
+                        .filter(stat => stat && stat.file_name)
+                        .map(stat => ({
+                            character: char.name || charId,
+                            avatar: char.avatar,
+
+                            file_name: String(stat.file_name)
+                                .replace(/\.jsonl$/i, ''),
+
+                            characterId: charId,
+                            isGroup: false,
+
+                            // 나중에 다시 요청하지 않도록 그대로 보관
+                            stat,
+                        }));
+                } catch {
+                    return [];
+                }
+            },
+        );
 
         let groupChats = [];
-        let groupPastChatsCache = {}; // [FIX] 그룹별 원본 stats를 여기 저장해서 재사용 (중복 fetch 제거)
+
         try {
             const resp = await fetch('/api/groups/all', {
                 method: 'POST',
                 headers: getRequestHeaders(),
             });
+
             if (resp.ok) {
                 const grps = await resp.json();
-                const groupResults = await mapWithConcurrency(grps, FETCH_CONCURRENCY, async (group) => {
-                    try {
-                        const chats = await getGroupPastChats(group.id);
-                        groupPastChatsCache[group.id] = chats; // [FIX] 나중에 stats 계산에 재사용
-                        return chats.map(chat => {
-                            const fileName = typeof chat === 'string'
-                                ? chat.replace('.jsonl', '')
-                                : String(chat.file_name || chat).replace('.jsonl', '');
-                            return {
-                                character: group.name || 'Group ' + group.id,
-                                avatar: group.avatar || '',
-                                file_name: fileName,
-                                characterId: group.id,
-                                isGroup: true,
-                                groupMembers: group.members || []
-                            };
-                        });
-                    } catch { return []; }
-                });
+
+                const groupResults = await mapWithConcurrency(
+                    grps,
+                    FETCH_CONCURRENCY,
+                    async (group) => {
+                        try {
+                            const chats =
+                                await getGroupPastChats(group.id);
+
+                            return chats.map(chat => {
+                                const stat =
+                                    typeof chat === 'string'
+                                        ? null
+                                        : chat;
+
+                                const fileName =
+                                    typeof chat === 'string'
+                                        ? chat.replace(
+                                            /\.jsonl$/i,
+                                            '',
+                                        )
+                                        : String(
+                                            chat.file_name || chat,
+                                        ).replace(
+                                            /\.jsonl$/i,
+                                            '',
+                                        );
+
+                                return {
+                                    character:
+                                        group.name ||
+                                        'Group ' + group.id,
+
+                                    avatar:
+                                        group.avatar || '',
+
+                                    file_name: fileName,
+
+                                    characterId: group.id,
+                                    isGroup: true,
+
+                                    groupMembers:
+                                        group.members || [],
+
+                                    stat,
+                                };
+                            });
+                        } catch {
+                            return [];
+                        }
+                    },
+                );
+
                 groupChats = groupResults.flat();
             }
         } catch (e) {
-            console.warn('[Chat_list_test] Failed to load group chats:', e);
+            console.warn(
+                '[Chat_list] Failed to load group chats:',
+                e,
+            );
         }
 
-        allChats = [...charChatLists.flat(), ...groupChats];
+        allChats = [
+            ...charChatLists.flat(),
+            ...groupChats,
+        ].map(chat => {
+            const stat = chat.stat;
 
-        const uniqueCharIds = [...new Set(allChats.filter(c => !c.isGroup).map(c => c.characterId))];
-
-        // [FIX] 캐릭터 stats도 concurrency 제한 적용
-        const charStatsEntries = (await mapWithConcurrency(uniqueCharIds, FETCH_CONCURRENCY, async (charId) => {
-            try {
-                const statsList = await getPastCharacterChats(charId);
-                return statsList.map(stat => {
-                    const fn = String(stat.file_name).replace('.jsonl', '');
-                    return [charId + ':' + fn, stat];
-                });
-            } catch { return []; }
-        })).flat();
-
-        // [FIX] 그룹 stats는 재요청하지 않고 위에서 이미 받아둔 groupPastChatsCache 재사용
-        // 기존: getGroupPastChats(groupId)를 그룹 수만큼 한 번 더 호출 (완전 중복 요청)
-        const groupStatsEntries = Object.entries(groupPastChatsCache).flatMap(([groupId, statsList]) => {
-            return statsList.map(stat => {
-                const fn = typeof stat === 'string'
-                    ? stat.replace('.jsonl', '')
-                    : String(stat.file_name || stat).replace('.jsonl', '');
-                return [groupId + ':' + fn, stat];
-            });
-        });
-
-        const chatStatsMap = Object.fromEntries([...charStatsEntries, ...groupStatsEntries]);
-
-        allChats = allChats.map(chat => {
-            const stat = chatStatsMap[chat.characterId + ':' + chat.file_name];
             let lastMesDate = null;
+
             if (stat && stat.last_mes) {
                 const m = timestampToMoment(stat.last_mes);
-                if (m && m.isValid()) lastMesDate = m.toDate();
-            }
-            if (!lastMesDate) {
-                const match = chat.file_name.match(/(\d{4}-\d{1,2}-\d{1,2})/);
-                if (match) {
-                    const parsed = new Date(match[1]);
-                    if (!isNaN(parsed.getTime())) lastMesDate = parsed;
+
+                if (m && m.isValid()) {
+                    lastMesDate = m.toDate();
                 }
             }
+
+            // 파일명 기반 fallback
+            if (!lastMesDate) {
+                const match = chat.file_name.match(
+                    /(\d{4}-\d{1,2}-\d{1,2})/,
+                );
+
+                if (match) {
+                    const parsed = new Date(match[1]);
+
+                    if (!isNaN(parsed.getTime())) {
+                        lastMesDate = parsed;
+                    }
+                }
+            }
+
             if (!lastMesDate) {
                 lastMesDate = new Date(0);
             }
 
-            const messageCount = stat?.chat_items ?? null;
-            const fileSize = stat?.file_size ?? null;
-            return { ...chat, stat, last_mes: lastMesDate, messageCount, fileSize };
+            return {
+                ...chat,
+
+                last_mes: lastMesDate,
+
+                messageCount:
+                    stat?.chat_items ?? null,
+
+                fileSize:
+                    stat?.file_size ?? null,
+            };
         });
 
-        allChats.sort((a, b) => b.last_mes - a.last_mes);
+        allChats.sort(
+            (a, b) => b.last_mes - a.last_mes,
+        );
+
         cachedChats = allChats;
         return allChats;
     })();
@@ -562,7 +722,7 @@ async function fetchAllChats() {
     try {
         return await fetchInFlight;
     } finally {
-        fetchInFlight = null; // [FIX] 완료(성공/실패 무관) 후 락 해제
+        fetchInFlight = null;
     }
 }
 
@@ -675,8 +835,19 @@ confirmDeleteBtn.addEventListener('click', async () => {
     }
 
     const allChats = await fetchAllChats();
-    const toDelete = allChats.filter(c => selectedChats.has(c.characterId + ':' + c.file_name));
+    const toDelete = allChats.filter(c => selectedChats.has(getChatKey(c)));
+    if (toDelete.length === 0) {
+    toastr.warning(t`No valid chats selected.`);
+    return;
+}
+// 현재 채팅은 반드시 마지막에 삭제한다.
+const orderedToDelete = [...toDelete].sort((a, b) => {
+    const aCurrent = isCurrentManagedChat(a);
+    const bCurrent = isCurrentManagedChat(b);
 
+    return Number(aCurrent) - Number(bCurrent);
+});
+    
     const content = document.createElement('div');
     content.innerHTML = '<h3>' + t`Delete selected chats?` + '</h3>';
     const countMsg = document.createElement('p');
@@ -692,9 +863,9 @@ confirmDeleteBtn.addEventListener('click', async () => {
     const result = await popup.show();
     if (result !== POPUP_RESULT.AFFIRMATIVE) return;
 
-    for (const chat of toDelete) {
-        await deleteChat(chat);
-    }
+for (const chat of orderedToDelete) {
+    await deleteChat(chat);
+}
 
     isSelectMode = false;
     selectedChats.clear();

@@ -718,9 +718,6 @@ container.appendChild(titleRow);
     const inputWrapper = document.createElement('div');
     inputWrapper.className = 'cm-input-wrapper';
 
-    filterInput.placeholder = t`Search by chat name...`;
-    filterInput.className = 'cm-filter-input';
-
     const clearBtn = document.createElement('button');
     clearBtn.className = 'cm-clear-btn hidden';
     clearBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';

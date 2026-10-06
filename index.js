@@ -225,11 +225,29 @@ function renderChatItem(chat, container, refreshCallback) {
     const isCurrentChat = chat.file_name === currentChatId;
     const stat = chat.stat;
 
-    const item = document.createElement('div');
-    item.className = 'cm-chat-item' + (isCurrentChat ? ' cm-current' : '');
+// 수정
+const item = document.createElement('div');
+item.className = 'cm-chat-item' + (isCurrentChat ? ' cm-current' : '');
 
-    const previewImg = createPreviewImage(chat);
-    item.appendChild(previewImg);
+if (isSelectMode) {
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'cm-select-checkbox';
+    const chatKey = chat.characterId + ':' + chat.file_name;
+    checkbox.checked = selectedChats.has(chatKey);
+    checkbox.addEventListener('change', (e) => {
+        e.stopPropagation();
+        if (checkbox.checked) {
+            selectedChats.add(chatKey);
+        } else {
+            selectedChats.delete(chatKey);
+        }
+    });
+    item.appendChild(checkbox);
+}
+
+const previewImg = createPreviewImage(chat);
+item.appendChild(previewImg);
 
     const info = document.createElement('div');
     info.className = 'cm-chat-info';
@@ -366,7 +384,21 @@ function renderChatItem(chat, container, refreshCallback) {
     container.appendChild(item);
 
 item.addEventListener('click', async (e) => {
-        if (e.target.closest('.cm-action-btn')) return;
+    if (e.target.closest('.cm-action-btn')) return;
+
+    // 선택 모드면 체크박스 토글
+    if (isSelectMode) {
+        const chatKey = chat.characterId + ':' + chat.file_name;
+        const checkbox = item.querySelector('.cm-select-checkbox');
+        if (selectedChats.has(chatKey)) {
+            selectedChats.delete(chatKey);
+            if (checkbox) checkbox.checked = false;
+        } else {
+            selectedChats.add(chatKey);
+            if (checkbox) checkbox.checked = true;
+        }
+        return;
+    }
         let ctx = SillyTavern.getContext();
         const currentChatId = getCurrentChatId();
 
@@ -610,22 +642,82 @@ function buildManagerUI() {
     const container = document.createElement('div');
     container.id = 'cm-container';
 
-    const titleRow = document.createElement('div');
-    titleRow.className = 'cm-title-row';
-    const titleText = document.createElement('div');
-    titleText.className = 'cm-title';
-    titleText.textContent = t`All Chats`;
-    titleRow.appendChild(titleText);
-    container.appendChild(titleRow);
+const titleRow = document.createElement('div');
+titleRow.className = 'cm-title-row';
+const titleText = document.createElement('div');
+titleText.className = 'cm-title';
+titleText.textContent = t`All Chats`;
+titleRow.appendChild(titleText);
 
+const selectDeleteBtn = document.createElement('button');
+selectDeleteBtn.className = 'cm-action-btn cm-select-mode-btn';
+selectDeleteBtn.innerHTML = '<i class="fa-solid fa-check-square"></i> ' + t`Select`;
+selectDeleteBtn.title = t`Select multiple chats to delete`;
+selectDeleteBtn.addEventListener('click', () => {
+    isSelectMode = !isSelectMode;
+    selectedChats.clear();
+    selectDeleteBtn.innerHTML = isSelectMode
+        ? '<i class="fa-solid fa-xmark"></i> ' + t`Cancel`
+        : '<i class="fa-solid fa-check-square"></i> ' + t`Select`;
+    selectDeleteBtn.classList.toggle('cm-select-mode-active', isSelectMode);
+    confirmDeleteBtn.classList.toggle('hidden', !isSelectMode);
+    renderChatList(container, filterInput.value.trim(), 0);
+});
+titleRow.appendChild(selectDeleteBtn);
+
+const confirmDeleteBtn = document.createElement('button');
+confirmDeleteBtn.className = 'cm-action-btn cm-delete-btn cm-confirm-delete-btn hidden';
+confirmDeleteBtn.innerHTML = '<i class="fa-solid fa-trash"></i> ' + t`Delete Selected`;
+confirmDeleteBtn.addEventListener('click', async () => {
+    if (selectedChats.size === 0) {
+        toastr.warning(t`No chats selected.`);
+        return;
+    }
+
+    const allChats = await fetchAllChats();
+    const toDelete = allChats.filter(c => selectedChats.has(c.characterId + ':' + c.file_name));
+
+    const content = document.createElement('div');
+    content.innerHTML = '<h3>' + t`Delete selected chats?` + '</h3>';
+    const countMsg = document.createElement('p');
+    countMsg.textContent = toDelete.length + t` chats will be deleted.`;
+    countMsg.style.color = '#e74c3c';
+    countMsg.style.fontWeight = 'bold';
+    content.appendChild(countMsg);
+
+    const popup = new Popup(content, POPUP_TYPE.CONFIRM, '', {
+        okButton: t`Delete All`,
+        cancelButton: t`Cancel`
+    });
+    const result = await popup.show();
+    if (result !== POPUP_RESULT.AFFIRMATIVE) return;
+
+    for (const chat of toDelete) {
+        await deleteChat(chat);
+    }
+
+    isSelectMode = false;
+    selectedChats.clear();
+    selectDeleteBtn.innerHTML = '<i class="fa-solid fa-check-square"></i> ' + t`Select`;
+    selectDeleteBtn.classList.remove('cm-select-mode-active');
+    confirmDeleteBtn.classList.add('hidden');
+    cachedChats = null;
+    await renderChatList(container, filterInput.value.trim(), 0);
+});
+titleRow.appendChild(confirmDeleteBtn);
+
+const filterInput = document.createElement('input');
+filterInput.type = 'text';
+filterInput.placeholder = t`Search by chat name...`;
+filterInput.className = 'cm-filter-input';    
+    
+container.appendChild(titleRow);
     const filterRow = document.createElement('div');
     filterRow.className = 'cm-filter-row';
 
     const inputWrapper = document.createElement('div');
     inputWrapper.className = 'cm-input-wrapper';
 
-    const filterInput = document.createElement('input');
-    filterInput.type = 'text';
     filterInput.placeholder = t`Search by chat name...`;
     filterInput.className = 'cm-filter-input';
 
